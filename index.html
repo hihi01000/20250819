@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>실시간 협업 그림판</title>
+    <title>실시간 협업 그림판 (줌/팬 기능)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* 터치 동작 시 화면 확대/축소를 방지하여 그림 그리기 경험을 향상시킵니다. */
@@ -15,6 +15,7 @@
         canvas {
             cursor: crosshair;
             border: 2px solid #e5e7eb; /* border-gray-200 */
+            background-color: #ffffff;
         }
         /* 컨트롤 요소들의 기본 스타일 */
         .control-item {
@@ -60,11 +61,11 @@
 
     <div class="w-full max-w-5xl mx-auto bg-white rounded-2xl shadow-2xl p-6 flex flex-col">
         <h1 class="text-2xl font-bold mb-4 text-gray-800 text-center">실시간 협업 그림판</h1>
-        <p class="text-center text-sm text-gray-500 mb-2">다른 사람과 함께 그림을 그려보세요!</p>
+        <p class="text-center text-sm text-gray-500 mb-2">마우스 휠 또는 두 손가락으로 확대/축소, 가운데 버튼으로 이동하세요.</p>
         <p class="text-center text-xs text-gray-400 mb-4 break-all">내 ID: <span id="userId" class="font-mono">인증 중...</span></p>
 
-        <!-- 컨트롤 패널: 색상, 굵기, 지우기 -->
-        <div class="bg-gray-50 p-4 rounded-lg mb-4 flex flex-wrap items-center justify-center gap-6">
+        <!-- 컨트롤 패널: 색상, 굵기, 지우기, 뷰 리셋 -->
+        <div class="bg-gray-50 p-4 rounded-lg mb-4 flex flex-wrap items-center justify-center gap-x-6 gap-y-3">
             <div class="control-item">
                 <label class="text-sm font-medium">색상:</label>
                 <div id="color-palette" class="flex gap-2">
@@ -79,11 +80,12 @@
                 <label for="brush-size" class="text-sm font-medium">굵기:</label>
                 <input id="brush-size" type="range" min="1" max="50" value="5" class="w-32 cursor-pointer">
             </div>
+            <button id="view-reset-button" class="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition">화면 원래대로</button>
             <button id="clear-button" class="px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 transition">모두 지우기</button>
         </div>
 
         <!-- 그림을 그릴 캔버스 -->
-        <div class="w-full aspect-video bg-white rounded-lg overflow-hidden">
+        <div class="w-full aspect-video bg-gray-200 rounded-lg overflow-hidden">
             <canvas id="drawing-board"></canvas>
         </div>
     </div>
@@ -104,18 +106,18 @@
     <!-- Firebase SDK 추가 -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, addDoc, onSnapshot, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- Firebase 설정 ---
         const firebaseConfig = {
-  apiKey: "AIzaSyDbPJEsEzqw8-sbADsrAlETz-0pp9agUEs",
-  authDomain: "project-572183735417624366.firebaseapp.com",
-  projectId: "project-572183735417624366",
-  storageBucket: "project-572183735417624366.firebasestorage.app",
-  messagingSenderId: "41521307209",
-  appId: "1:41521307209:web:323ec5eccc79eeb6ac6998"
-};
+          apiKey: "AIzaSyDbPJEsEzqw8-sbADsrAlETz-0pp9agUEs",
+          authDomain: "project-572183735417624366.firebaseapp.com",
+          projectId: "project-572183735417624366",
+          storageBucket: "project-572183735417624366.firebasestorage.app",
+          messagingSenderId: "41521307209",
+          appId: "1:41521307209:web:323ec5eccc79eeb6ac6998"
+        };
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-drawing-app';
         
         const app = initializeApp(firebaseConfig);
@@ -127,23 +129,61 @@
 
         let currentUserId = null;
 
-        // --- 캔버스 설정 ---
+        // --- 캔버스 및 상태 변수 설정 ---
         const canvas = document.getElementById('drawing-board');
         const ctx = canvas.getContext('2d');
         const controls = { color: '#000000', size: 5 };
         
+        // 그리기 상태
         let isDrawing = false;
         let lastX = 0;
         let lastY = 0;
+
+        // 줌/팬(이동) 상태
+        let transform = { scale: 1, offsetX: 0, offsetY: 0 };
+        let isPanning = false;
+        let panStart = { x: 0, y: 0 };
+        let pinchStartDist = 0;
+
+        // 모든 그리기 데이터를 저장하는 배열 (로컬 캐시)
+        let allDrawActions = [];
 
         function resizeCanvas() {
             const container = canvas.parentElement;
             const { width, height } = container.getBoundingClientRect();
             canvas.width = width;
             canvas.height = height;
+            redrawCanvas(); // 리사이즈 후 다시 그리기
         }
 
-        // --- 그리기 함수 ---
+        // --- 화면 좌표 <-> 캔버스 좌표 변환 ---
+        function screenToWorld(screenX, screenY) {
+            return {
+                x: (screenX - transform.offsetX) / transform.scale,
+                y: (screenY - transform.offsetY) / transform.scale
+            };
+        }
+
+        // --- 렌더링 함수 ---
+        function redrawCanvas() {
+            // 캔버스 초기화
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.restore();
+
+            // 현재 줌/팬 적용
+            ctx.translate(transform.offsetX, transform.offsetY);
+            ctx.scale(transform.scale, transform.scale);
+            
+            // 캐시된 모든 선 그리기
+            allDrawActions.forEach(action => {
+                if (action.x0 !== undefined) {
+                    drawLine(action.x0, action.y0, action.x1, action.y1, action.color, action.size);
+                }
+            });
+        }
+
         function drawLine(x0, y0, x1, y1, color, size) {
             ctx.beginPath();
             ctx.moveTo(x0, y0);
@@ -155,24 +195,25 @@
             ctx.closePath();
         }
 
+        // --- 이벤트 핸들러 ---
         function startDrawing(e) {
             if (!currentUserId) return;
             isDrawing = true;
-            [lastX, lastY] = getCoords(e);
+            const pos = getEventCoords(e);
+            const worldPos = screenToWorld(pos.x, pos.y);
+            [lastX, lastY] = [worldPos.x, worldPos.y];
         }
 
         function draw(e) {
             if (!isDrawing) return;
             e.preventDefault();
 
-            const [currentX, currentY] = getCoords(e);
+            const pos = getEventCoords(e);
+            const worldPos = screenToWorld(pos.x, pos.y);
             
-            // [FIX] 로컬에서 먼저 그려서 즉시 반응하도록 수정 (지연 현상 개선)
-            drawLine(lastX, lastY, currentX, currentY, controls.color, controls.size);
-
             const drawData = {
                 x0: lastX, y0: lastY,
-                x1: currentX, y1: currentY,
+                x1: worldPos.x, y1: worldPos.y,
                 color: controls.color,
                 size: controls.size,
                 drawerId: currentUserId,
@@ -180,31 +221,29 @@
             };
 
             addDoc(drawingCollection, drawData);
-            [lastX, lastY] = [currentX, currentY];
+            [lastX, lastY] = [worldPos.x, worldPos.y];
         }
         
         function stopDrawing() {
             isDrawing = false;
         }
 
-        function getCoords(e) {
+        function getEventCoords(e) {
             const rect = canvas.getBoundingClientRect();
             const event = e.touches ? e.touches[0] : e;
-            return [
-                (event.clientX - rect.left) / rect.width * canvas.width,
-                (event.clientY - rect.top) / rect.height * canvas.height
-            ];
+            return { x: event.clientX - rect.left, y: event.clientY - rect.top };
         }
 
         // --- 컨트롤 UI 설정 ---
         const colorPalette = document.getElementById('color-palette');
         const brushSizeInput = document.getElementById('brush-size');
         const clearButton = document.getElementById('clear-button');
+        const viewResetButton = document.getElementById('view-reset-button');
         const clearModal = document.getElementById('clear-modal');
         const confirmClearBtn = document.getElementById('confirm-clear-btn');
         const cancelClearBtn = document.getElementById('cancel-clear-btn');
 
-        colorPalette.addEventListener('click', (e) => {
+        colorPalette.addEventListener('click', e => {
             if (e.target.classList.contains('color-box')) {
                 controls.color = e.target.dataset.color;
                 document.querySelectorAll('.color-box').forEach(box => box.classList.remove('selected'));
@@ -212,64 +251,158 @@
             }
         });
 
-        brushSizeInput.addEventListener('input', (e) => {
-            controls.size = e.target.value;
-        });
-
-        // [FIX] confirm() 대신 커스텀 모달 사용
+        brushSizeInput.addEventListener('input', e => controls.size = e.target.value);
         clearButton.addEventListener('click', () => clearModal.classList.remove('hidden'));
         cancelClearBtn.addEventListener('click', () => clearModal.classList.add('hidden'));
         confirmClearBtn.addEventListener('click', () => {
-            addDoc(drawingCollection, { action: 'clear', clearerId: currentUserId });
+            addDoc(drawingCollection, { action: 'clear', clearerId: currentUserId, timestamp: Date.now() });
             clearModal.classList.add('hidden');
         });
+        viewResetButton.addEventListener('click', () => {
+            transform = { scale: 1, offsetX: 0, offsetY: 0 };
+            redrawCanvas();
+        });
+
+        // --- 줌 & 팬 이벤트 핸들러 ---
+        // 마우스 휠 (줌)
+        canvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            const scaleAmount = 1.1;
+            const pos = getEventCoords(e);
+            
+            const worldPos = screenToWorld(pos.x, pos.y);
+            
+            if (e.deltaY < 0) { // Zoom in
+                transform.scale *= scaleAmount;
+            } else { // Zoom out
+                transform.scale /= scaleAmount;
+            }
+
+            transform.offsetX = pos.x - worldPos.x * transform.scale;
+            transform.offsetY = pos.y - worldPos.y * transform.scale;
+            
+            redrawCanvas();
+        });
+
+        // 마우스 이동 (팬)
+        canvas.addEventListener('mousedown', e => {
+            if (e.button === 1) { // Middle mouse button
+                isPanning = true;
+                panStart = { x: e.clientX, y: e.clientY };
+                canvas.style.cursor = 'grabbing';
+            } else {
+                startDrawing(e);
+            }
+        });
+
+        canvas.addEventListener('mousemove', e => {
+            if (isPanning) {
+                const dx = e.clientX - panStart.x;
+                const dy = e.clientY - panStart.y;
+                transform.offsetX += dx;
+                transform.offsetY += dy;
+                panStart = { x: e.clientX, y: e.clientY };
+                redrawCanvas();
+            } else {
+                draw(e);
+            }
+        });
+
+        canvas.addEventListener('mouseup', e => {
+            if (e.button === 1) {
+                isPanning = false;
+                canvas.style.cursor = 'crosshair';
+            } else {
+                stopDrawing(e);
+            }
+        });
+        canvas.addEventListener('mouseout', e => stopDrawing(e));
+
+        // 터치 (그리기, 팬, 줌)
+        canvas.addEventListener('touchstart', e => {
+            if (e.touches.length === 1) {
+                startDrawing(e);
+            } else if (e.touches.length === 2) {
+                isDrawing = false; // 두 손가락 터치 시 그리기는 중단
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                pinchStartDist = Math.sqrt(dx * dx + dy * dy);
+                panStart = { 
+                    x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+                    y: (e.touches[0].clientY + e.touches[1].clientY) / 2
+                };
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', e => {
+            e.preventDefault();
+            if (e.touches.length === 1) {
+                draw(e);
+            } else if (e.touches.length === 2) {
+                // 핀치 줌
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                const pinchCurrentDist = Math.sqrt(dx * dx + dy * dy);
+                const scaleAmount = pinchCurrentDist / pinchStartDist;
+                
+                const midPoint = { 
+                    x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
+                    y: (e.touches[0].clientY + e.touches[1].clientY) / 2
+                };
+                const rect = canvas.getBoundingClientRect();
+                const screenPos = { x: midPoint.x - rect.left, y: midPoint.y - rect.top };
+                const worldPos = screenToWorld(screenPos.x, screenPos.y);
+
+                transform.scale *= scaleAmount;
+                transform.offsetX = screenPos.x - worldPos.x * transform.scale;
+                transform.offsetY = screenPos.y - worldPos.y * transform.scale;
+                
+                pinchStartDist = pinchCurrentDist;
+
+                // 두 손가락 팬
+                const panCurrent = midPoint;
+                transform.offsetX += panCurrent.x - panStart.x;
+                transform.offsetY += panCurrent.y - panStart.y;
+                panStart = panCurrent;
+
+                redrawCanvas();
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', e => stopDrawing(e));
+
 
         // --- Firebase 실시간 동기화 ---
-        // 1. 인증 상태 변경 리스너 설정
-        onAuthStateChanged(auth, (user) => {
+        onAuthStateChanged(auth, user => {
             if (user) {
                 currentUserId = user.uid;
                 document.getElementById('userId').textContent = currentUserId;
                 
-                // 인증 완료 후 Firestore 리스너 설정
-                onSnapshot(query(drawingCollection), (snapshot) => {
-                    snapshot.docChanges().forEach((change) => {
+                const q = query(drawingCollection, orderBy("timestamp"));
+                onSnapshot(q, snapshot => {
+                    snapshot.docChanges().forEach(change => {
                         if (change.type === "added") {
                             const data = change.doc.data();
-                            
                             if (data.action === 'clear') {
-                                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                                return;
-                            }
-                            
-                            // [FIX] 내가 그린 그림이 서버를 통해 다시 돌아오는 '에코' 현상 방지
-                            // 로컬에서 아직 서버에 반영되지 않은 쓰기 작업은 그리지 않습니다.
-                            // 이렇게 하면 페이지 새로고침 시에는 모든 그림을 그리고, 실시간 드로잉 시에는 중복을 방지합니다.
-                            const isPendingWrite = change.doc.metadata.hasPendingWrites;
-                            if (!isPendingWrite) {
-                                drawLine(data.x0, data.y0, data.x1, data.y1, data.color, data.size);
+                                allDrawActions = [];
+                            } else {
+                                allDrawActions.push(data);
                             }
                         }
                     });
-                }, (error) => {
-                    console.error("Firestore snapshot listener error:", error);
-                });
-
+                    redrawCanvas();
+                }, error => console.error("Firestore snapshot listener error:", error));
             } else {
                 currentUserId = null;
                 document.getElementById('userId').textContent = '인증되지 않음';
             }
         });
 
-        // [FIX] 2. 페이지 로드 시 즉시 인증 시도 (Permission Denied 오류 해결)
+        // [FIX] 인증 로직 수정
         const initializeAuth = async () => {
             try {
-                const token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-                if (token) {
-                    await signInWithCustomToken(auth, token);
-                } else {
-                    await signInAnonymously(auth);
-                }
+                // 사용자가 자신의 firebaseConfig를 사용하므로, 항상 익명 로그인을 사용합니다.
+                await signInAnonymously(auth);
             } catch (error) {
                 console.error("Authentication failed:", error);
                 document.getElementById('userId').textContent = '인증 실패';
@@ -279,15 +412,7 @@
         // --- 초기화 ---
         window.addEventListener('load', () => {
             resizeCanvas();
-            initializeAuth(); // 인증 먼저 시작
-            
-            canvas.addEventListener('mousedown', startDrawing);
-            canvas.addEventListener('mousemove', draw);
-            canvas.addEventListener('mouseup', stopDrawing);
-            canvas.addEventListener('mouseout', stopDrawing);
-            canvas.addEventListener('touchstart', startDrawing, { passive: false });
-            canvas.addEventListener('touchmove', draw, { passive: false });
-            canvas.addEventListener('touchend', stopDrawing);
+            initializeAuth();
         });
         window.addEventListener('resize', resizeCanvas);
 
