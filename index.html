@@ -108,7 +108,14 @@
         import { getFirestore, collection, addDoc, onSnapshot, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- Firebase 설정 ---
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : { apiKey: "DEMO", authDomain: "DEMO", projectId: "DEMO" };
+        const firebaseConfig = {
+  apiKey: "AIzaSyDbPJEsEzqw8-sbADsrAlETz-0pp9agUEs",
+  authDomain: "project-572183735417624366.firebaseapp.com",
+  projectId: "project-572183735417624366",
+  storageBucket: "project-572183735417624366.firebasestorage.app",
+  messagingSenderId: "41521307209",
+  appId: "1:41521307209:web:323ec5eccc79eeb6ac6998"
+};
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-drawing-app';
         
         const app = initializeApp(firebaseConfig);
